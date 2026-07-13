@@ -7,6 +7,7 @@ from coolhurst_booker.config import get_settings
 from coolhurst_booker.db.repository import get_repository
 from coolhurst_booker.scraper.auth import login
 from coolhurst_booker.scraper.browser import browser_session, dismiss_cookie_banner, wait_for_grid
+from coolhurst_booker.scraper.google_appointments import scrape_google_appointments
 from coolhurst_booker.scraper.navigation import scrape_days, select_booking_area
 from coolhurst_booker.scraper.parser import parse_page
 
@@ -17,11 +18,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_scrape(once: bool = False) -> int:
+def run_coolhurst_scrape(once: bool = False) -> int:
     settings = get_settings()
     repo = get_repository(settings)
     result_started = datetime.now(UTC).isoformat()
-    run_id = repo.start_scrape_run(result_started)
+    run_id = repo.start_scrape_run(result_started, source="coolhurst")
 
     try:
         with browser_session(settings) as (_, __, ___, page):
@@ -46,13 +47,13 @@ def run_scrape(once: bool = False) -> int:
             )
 
             logger.info(
-                "Scrape complete: %d slots across %d dates (%d days scanned)",
+                "Coolhurst scrape complete: %d slots across %d dates (%d days scanned)",
                 len(slots),
                 len(dates),
                 settings.coolhurst_days_ahead,
             )
             if once:
-                print(f"Found {len(slots)} available slots")
+                print(f"Found {len(slots)} available court slots")
                 for slot in slots[:10]:
                     print(f"  {slot.date} {slot.court} {slot.start_time}-{slot.end_time} {slot.price or ''}")
                 if len(slots) > 10:
@@ -69,12 +70,72 @@ def run_scrape(once: bool = False) -> int:
             status="error",
             error=str(exc),
         )
-        logger.exception("Scrape failed")
+        logger.exception("Coolhurst scrape failed")
         raise
 
 
+def run_google_scrape(once: bool = False) -> int:
+    settings = get_settings()
+    repo = get_repository(settings)
+    result_started = datetime.now(UTC).isoformat()
+    run_id = repo.start_scrape_run(result_started, source="google")
+
+    try:
+        with browser_session(settings) as (_, __, ___, page):
+            slots = scrape_google_appointments(page, settings)
+            repo.replace_person_slots(slots)
+            finished = datetime.now(UTC).isoformat()
+            repo.finish_scrape_run(
+                run_id=run_id,
+                finished_at=finished,
+                days_scraped=settings.coolhurst_days_ahead,
+                slots_found=len(slots),
+                status="ok",
+            )
+            logger.info("Google appointment scrape complete: %d person slots", len(slots))
+            if once:
+                print(f"Found {len(slots)} person availability slots")
+                for slot in slots[:10]:
+                    print(f"  {slot.date} {slot.start_time}-{slot.end_time}")
+                if len(slots) > 10:
+                    print(f"  ... and {len(slots) - 10} more")
+            return len(slots)
+    except Exception as exc:
+        finished = datetime.now(UTC).isoformat()
+        repo.finish_scrape_run(
+            run_id=run_id,
+            finished_at=finished,
+            days_scraped=0,
+            slots_found=0,
+            status="error",
+            error=str(exc),
+        )
+        logger.exception("Google appointment scrape failed")
+        raise
+
+
+def run_scrape(once: bool = False) -> dict[str, int | None]:
+    """Run Coolhurst and Google scrapes independently; one failure does not block the other."""
+    results: dict[str, int | None] = {"coolhurst": None, "google": None}
+
+    try:
+        results["coolhurst"] = run_coolhurst_scrape(once=once)
+    except Exception:
+        logger.exception("Coolhurst scrape failed during combined run")
+
+    try:
+        results["google"] = run_google_scrape(once=once)
+    except Exception:
+        logger.exception("Google scrape failed during combined run")
+
+    if results["coolhurst"] is None and results["google"] is None:
+        raise RuntimeError("Both Coolhurst and Google scrapes failed")
+
+    return results
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Coolhurst court availability scraper")
+    parser = argparse.ArgumentParser(description="Coolhurst + Google appointment availability scraper")
     parser.add_argument("--once", action="store_true", help="Run a single scrape and exit")
     args = parser.parse_args()
 
