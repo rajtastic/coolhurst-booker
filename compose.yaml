@@ -1,0 +1,16 @@
+services:
+  coolhurst-booker:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      COOLHURST_DB_PATH: /data/courts.db
+      PLAYWRIGHT_HEADLESS: "true"
+    volumes:
+      - coolhurst-data:/data
+    restart: unless-stopped
+
+volumes:
+  coolhurst-data:
