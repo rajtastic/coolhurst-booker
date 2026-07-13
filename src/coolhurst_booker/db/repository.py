@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from coolhurst_booker.config import Settings, get_settings
-from coolhurst_booker.models import CourtSlot
+from coolhurst_booker.models import CourtSlot, PersonSlot
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS court_slots (
     PRIMARY KEY (date, court, start_time)
 );
 
+CREATE TABLE IF NOT EXISTS person_slots (
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    scraped_at TEXT NOT NULL,
+    PRIMARY KEY (date, start_time)
+);
+
 CREATE TABLE IF NOT EXISTS scrape_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -26,9 +34,21 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     days_scraped INTEGER,
     slots_found INTEGER,
     status TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    source TEXT NOT NULL DEFAULT 'coolhurst'
 );
 """
+
+
+def _time_to_minutes(value: str) -> int:
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def intervals_overlap(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
+    return _time_to_minutes(a_start) < _time_to_minutes(b_end) and _time_to_minutes(
+        a_end
+    ) > _time_to_minutes(b_start)
 
 
 class CourtRepository:
@@ -45,12 +65,21 @@ class CourtRepository:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(scrape_runs)").fetchall()
+            }
+            if "source" not in cols:
+                conn.execute(
+                    "ALTER TABLE scrape_runs ADD COLUMN source TEXT NOT NULL DEFAULT 'coolhurst'"
+                )
+            conn.commit()
 
-    def start_scrape_run(self, started_at: str) -> int:
+    def start_scrape_run(self, started_at: str, source: str = "coolhurst") -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO scrape_runs (started_at, status) VALUES (?, 'running')",
-                (started_at,),
+                "INSERT INTO scrape_runs (started_at, status, source) VALUES (?, 'running', ?)",
+                (started_at, source),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -104,6 +133,30 @@ class CourtRepository:
             )
             conn.commit()
 
+    def replace_person_slots(self, slots: list[PersonSlot]) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM person_slots")
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO person_slots
+                (date, start_time, end_time, scraped_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(s.date, s.start_time, s.end_time, s.scraped_at) for s in slots],
+            )
+            conn.commit()
+
+    def get_person_slots(self, date: str | None = None) -> list[dict]:
+        query = "SELECT * FROM person_slots WHERE 1=1"
+        params: list[str] = []
+        if date:
+            query += " AND date = ?"
+            params.append(date)
+        query += " ORDER BY date, start_time"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+
     def get_slots(self, date: str | None = None, court: str | None = None) -> list[dict]:
         query = "SELECT * FROM court_slots WHERE 1=1"
         params: list[str] = []
@@ -119,7 +172,26 @@ class CourtRepository:
 
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [dict(row) for row in rows]
+            slots = [dict(row) for row in rows]
+            person_slots = [dict(row) for row in conn.execute("SELECT * FROM person_slots").fetchall()]
+
+        by_date: dict[str, list[dict]] = {}
+        for person in person_slots:
+            by_date.setdefault(person["date"], []).append(person)
+
+        for slot in slots:
+            candidates = by_date.get(slot["date"], [])
+            slot["person_available"] = any(
+                intervals_overlap(
+                    slot["start_time"],
+                    slot["end_time"],
+                    person["start_time"],
+                    person["end_time"],
+                )
+                for person in candidates
+            )
+
+        return slots
 
     def get_summary(self) -> list[dict]:
         with self._connect() as conn:
@@ -133,15 +205,16 @@ class CourtRepository:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_last_scrape(self) -> dict | None:
+    def get_last_scrape(self, source: str = "coolhurst") -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM scrape_runs
-                WHERE status = 'ok'
+                WHERE status = 'ok' AND source = ?
                 ORDER BY finished_at DESC
                 LIMIT 1
-                """
+                """,
+                (source,),
             ).fetchone()
             return dict(row) if row else None
 

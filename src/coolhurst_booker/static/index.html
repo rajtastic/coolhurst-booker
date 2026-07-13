@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Book a game of tennis — see when courts are free at Coolhurst" />
+  <meta name="description" content="Book a game of tennis — see when courts and your host are free at Coolhurst" />
   <title>Play Tennis · Coolhurst Courts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -15,8 +15,8 @@
     <header class="hero">
       <div class="hero-inner">
         <p class="eyebrow">Coolhurst Tennis &amp; Squash Club</p>
-        <h1>Book a game of tennis</h1>
-        <p class="lead">
+        <h1 id="hero-title">Book a game of tennis</h1>
+        <p class="lead" id="hero-lead">
           These are the outdoor courts available over the next two weeks.
           Pick a time that works for you — we'll confirm the booking together.
         </p>
@@ -29,6 +29,14 @@
 
     <main class="main">
       <section class="filters" aria-label="Filters">
+        <div class="filter-group">
+          <span class="filter-label">Calendar</span>
+          <div class="chip-row" role="group" id="calendar-filters">
+            <button type="button" class="chip chip--active" data-calendar="both">Both</button>
+            <button type="button" class="chip" data-calendar="person" id="chip-person">Person</button>
+            <button type="button" class="chip" data-calendar="courts">Courts</button>
+          </div>
+        </div>
         <div class="filter-group">
           <span class="filter-label">Surface</span>
           <div class="chip-row" role="group" id="surface-filters">
@@ -62,9 +70,30 @@
 
     <footer class="footer">
       <p>Courts at <a href="https://coolhurst.clubsolution.co.uk/newlook/default.asp" target="_blank" rel="noopener">Coolhurst Tennis &amp; Squash Club</a>, London N8</p>
-      <p class="footer-note">Availability updates every minute · <a href="/docs">API</a></p>
+      <p class="footer-note" id="footer-note">Availability updates every 5 minutes · <a href="/docs">API</a></p>
     </footer>
   </div>
+
+  <div class="modal hidden" id="book-modal" role="dialog" aria-modal="true" aria-labelledby="book-modal-title">
+    <div class="modal__backdrop" data-close-modal></div>
+    <div class="modal__panel">
+      <button type="button" class="modal__close" data-close-modal aria-label="Close">&times;</button>
+      <h2 id="book-modal-title">Book this slot</h2>
+      <p class="modal__slot" id="book-modal-slot"></p>
+      <ul class="modal__status" id="book-modal-status" aria-label="Availability"></ul>
+      <p class="modal__hint" id="book-modal-hint">
+        Open both links to reserve the court and block time on the calendar.
+      </p>
+      <div class="modal__actions" id="book-modal-actions">
+        <a class="btn btn--primary" id="book-appointment-link" href="#" target="_blank" rel="noopener">Book with host</a>
+        <a class="btn btn--secondary" id="book-court-link" href="#" target="_blank" rel="noopener">Book court at Coolhurst</a>
+      </div>
+      <div class="modal__actions hidden" id="book-modal-fallback">
+        <button type="button" class="btn btn--primary" id="switch-to-both">Show times when both are free</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>

@@ -15,7 +15,15 @@ class Settings(BaseSettings):
     coolhurst_days_ahead: int = 14
     coolhurst_db_path: str = "./data/courts.db"
     playwright_headless: bool = True
-    scrape_interval_seconds: int = 60
+    scrape_interval_seconds: int = 300
+
+    booker_name: str = "Roshan"
+    google_appointment_url: str = ""
+    coolhurst_book_url: str = (
+        "https://coolhurst.clubsolution.co.uk/newlook/proc_baner.asp"
+    )
+    google_username: str = ""
+    google_password: str = ""
 
     @property
     def proc_baner_url(self) -> str:

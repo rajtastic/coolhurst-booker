@@ -13,6 +13,14 @@ class CourtSlot:
     scraped_at: str
 
 
+@dataclass(frozen=True)
+class PersonSlot:
+    date: str
+    start_time: str
+    end_time: str
+    scraped_at: str
+
+
 @dataclass
 class ScrapeResult:
     slots: list[CourtSlot]

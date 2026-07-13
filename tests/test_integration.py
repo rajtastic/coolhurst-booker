@@ -16,8 +16,10 @@ def test_live_scrape_once():
     if os.environ.get("RUN_LIVE_SCRAPE") != "1":
         pytest.skip("Set RUN_LIVE_SCRAPE=1 to run live integration test")
 
-    count = run_scrape(once=True)
-    assert count >= 0
+    results = run_scrape(once=True)
+    assert isinstance(results, dict)
+    assert results.get("coolhurst") is None or results["coolhurst"] >= 0
+    assert results.get("google") is None or results["google"] >= 0
 
     repo = get_repository(settings)
     summary = repo.get_summary()

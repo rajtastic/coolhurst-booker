@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Coolhurst Booker PoC",
-    description="Court availability scraper API",
+    description="Court and calendar availability scraper API",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -75,13 +75,24 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/config")
+def public_config() -> dict:
+    settings = get_settings()
+    return {
+        "booker_name": settings.booker_name,
+        "appointment_url": settings.google_appointment_url,
+        "coolhurst_book_url": settings.coolhurst_book_url,
+        "scrape_interval_seconds": settings.scrape_interval_seconds,
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     repo = get_repository()
-    last = repo.get_last_scrape()
     return {
         "status": "ok",
-        "last_scrape": last,
+        "last_scrape": repo.get_last_scrape(source="coolhurst"),
+        "last_google_scrape": repo.get_last_scrape(source="google"),
     }
 
 
@@ -92,6 +103,16 @@ def list_slots(
 ) -> dict:
     repo = get_repository()
     slots = repo.get_slots(date=date, court=court)
+    person_slots = repo.get_person_slots(date=date)
+    return {"count": len(slots), "slots": slots, "person_slots": person_slots}
+
+
+@app.get("/person-slots")
+def list_person_slots(
+    date: str | None = Query(None, description="Filter by date YYYY-MM-DD"),
+) -> dict:
+    repo = get_repository()
+    slots = repo.get_person_slots(date=date)
     return {"count": len(slots), "slots": slots}
 
 
@@ -100,21 +121,3 @@ def slots_summary() -> dict:
     repo = get_repository()
     summary = repo.get_summary()
     return {"days": len(summary), "summary": summary}
-
-
-@app.post("/scrape")
-def trigger_scrape() -> dict:
-    if not _scrape_lock.acquire(blocking=False):
-        return {"status": "skipped", "message": "Scrape already in progress"}
-
-    def _run() -> None:
-        try:
-            count = run_scrape()
-            logger.info("Manual scrape found %d slots", count)
-        except Exception:
-            logger.exception("Manual scrape failed")
-        finally:
-            _scrape_lock.release()
-
-    threading.Thread(target=_run, daemon=True).start()
-    return {"status": "started"}
