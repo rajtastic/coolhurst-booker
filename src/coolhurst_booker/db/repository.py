@@ -104,7 +104,13 @@ class CourtRepository:
             )
             conn.commit()
 
-    def upsert_slots(self, slots: list[CourtSlot], dates: list[str]) -> None:
+    def upsert_slots(
+        self,
+        slots: list[CourtSlot],
+        dates: list[str],
+        *,
+        prune_before: str | None = None,
+    ) -> None:
         with self._connect() as conn:
             if dates:
                 placeholders = ",".join("?" for _ in dates)
@@ -131,6 +137,8 @@ class CourtRepository:
                     for s in slots
                 ],
             )
+            if prune_before:
+                conn.execute("DELETE FROM court_slots WHERE date < ?", (prune_before,))
             conn.commit()
 
     def replace_person_slots(self, slots: list[PersonSlot]) -> None:
@@ -145,6 +153,11 @@ class CourtRepository:
                 [(s.date, s.start_time, s.end_time, s.scraped_at) for s in slots],
             )
             conn.commit()
+
+    def count_person_slots(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM person_slots").fetchone()
+            return int(row["n"]) if row else 0
 
     def get_person_slots(self, date: str | None = None) -> list[dict]:
         query = "SELECT * FROM person_slots WHERE 1=1"
@@ -211,6 +224,22 @@ class CourtRepository:
                 """
                 SELECT * FROM scrape_runs
                 WHERE status = 'ok' AND source = ?
+                ORDER BY finished_at DESC
+                LIMIT 1
+                """,
+                (source,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_latest_scrape_run(self, source: str = "coolhurst") -> dict | None:
+        """Most recent finished scrape for a source (ok or error)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM scrape_runs
+                WHERE source = ?
+                  AND status IN ('ok', 'error')
+                  AND finished_at IS NOT NULL
                 ORDER BY finished_at DESC
                 LIMIT 1
                 """,

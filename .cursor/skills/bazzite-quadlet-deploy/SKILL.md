@@ -12,15 +12,16 @@ description: >-
 ## Preconditions
 
 1. Confirm the session is on the Bazzite NUC (or warn that build/install steps must run there).
-2. Ensure the **homelab-infra** workspace is open or its path is known — the Quadlet unit file is written there as `nuc/containers/coolhurst-booker.container`.
-3. Follow **homelab-infra** `.cursor/skills/nuc-quadlet/` for shared Quadlet/Traefik conventions when editing that file.
+2. Ensure the **homelab** workspace is open — Quadlet unit lives at `nuc12/containers/coolhurst-booker.container`.
+3. Follow shared Quadlet/Traefik conventions used by other `nuc12/containers/*.container` units.
 
 ## Key facts
 
 - Quadlets need an **image**. Cloning the repo is not enough.
 - Build locally: `podman build -t localhost/coolhurst-booker:latest .` (Playwright base image is large; first build is slow).
-- Do **not** use `PublishPort=8080:8080` — Traefik already binds host port 8080. Use `Network=web` + Traefik labels (Dashy pattern).
+- Do **not** use `PublishPort=8080:8080` — Traefik already binds host port 8080. Use `Network=web` + Traefik labels, and `PublishPort=8082:8080` for Oracle Caddy / Tailscale.
 - Never commit secrets. Host env file: `~/.config/coolhurst-booker/coolhurst-booker.env` (mode `600`).
+- Public hostname: **`tennis.tastic.uk`**.
 
 ## Steps
 
@@ -54,22 +55,24 @@ Required / recommended keys:
 | `COOLHURST_DB_PATH` | Must be `/data/courts.db` in the container |
 | `PLAYWRIGHT_HEADLESS` | `true` |
 | `SCRAPE_INTERVAL_SECONDS` | Prefer `300` (not the Dockerfile default of `60`) |
+| `HEALTH_STALE_AFTER_SECONDS` | Prefer `3600` (matches UI red / 1h stale tier; yellow warn is `HEALTH_WARN_AFTER_SECONDS=300`) |
 
 Do not put credentials in the Quadlet file or in git.
 
-### 3. Write Quadlet in homelab-infra
+### 3. Write Quadlet in homelab
 
-Create `nuc/containers/coolhurst-booker.container` with this template (do not invent a host publish of 8080):
+Create `nuc12/containers/coolhurst-booker.container` with this template:
 
 ```ini
 [Unit]
 Description=Coolhurst Booker
-After=network-online.target
+After=network-online.target traefik.service
 
 [Container]
 ContainerName=coolhurst-booker
 Image=localhost/coolhurst-booker:latest
 Network=web
+PublishPort=8082:8080
 RemapUsers=keep-id
 EnvironmentFile=%h/.config/coolhurst-booker/coolhurst-booker.env
 Volume=coolhurst-data:/data:Z
@@ -77,19 +80,11 @@ ShmSize=1g
 
 Label=traefik.enable=true
 Label=traefik.docker.network=web
-
-Label=traefik.http.routers.coolhurst-testbed.rule=Host(`booker.mytestbed.co.uk`)
-Label=traefik.http.routers.coolhurst-testbed.entrypoints=websecure
-Label=traefik.http.routers.coolhurst-testbed.tls=true
-Label=traefik.http.routers.coolhurst-testbed.tls.certresolver=myresolver
-Label=traefik.http.routers.coolhurst-testbed.service=coolhurst-svc
-
-Label=traefik.http.routers.coolhurst-tastic.rule=Host(`booker.tastic.uk`)
-Label=traefik.http.routers.coolhurst-tastic.entrypoints=websecure
-Label=traefik.http.routers.coolhurst-tastic.tls=true
-Label=traefik.http.routers.coolhurst-tastic.tls.certresolver=myresolver
-Label=traefik.http.routers.coolhurst-tastic.service=coolhurst-svc
-
+Label=traefik.http.routers.coolhurst-tennis.rule=Host(`tennis.tastic.uk`)
+Label=traefik.http.routers.coolhurst-tennis.entrypoints=websecure
+Label=traefik.http.routers.coolhurst-tennis.tls=true
+Label=traefik.http.routers.coolhurst-tennis.tls.certresolver=myresolver
+Label=traefik.http.routers.coolhurst-tennis.service=coolhurst-svc
 Label=traefik.http.services.coolhurst-svc.loadbalancer.server.port=8080
 
 [Service]
@@ -99,14 +94,18 @@ Restart=always
 WantedBy=default.target
 ```
 
+Also add Caddy on the Oracle VM (`homelab/vm/Caddyfile`):
+
+```caddy
+tennis.tastic.uk {
+    reverse_proxy 100.100.61.75:8082
+}
+```
+
 ### 4. Install and start (user Quadlet)
 
 ```bash
-mkdir -p ~/.config/containers/systemd
-# Symlink preferred so repo stays source of truth:
-ln -sf /path/to/homelab-infra/nuc/containers/coolhurst-booker.container \
-  ~/.config/containers/systemd/coolhurst-booker.container
-
+# nuc12/containers is already symlinked into ~/.config/containers/systemd/containers
 systemctl --user daemon-reload
 systemctl --user enable --now coolhurst-booker.service
 ```
@@ -116,22 +115,22 @@ systemctl --user enable --now coolhurst-booker.service
 ```bash
 systemctl --user status coolhurst-booker.service
 podman logs coolhurst-booker
-podman exec coolhurst-booker curl -fsS http://127.0.0.1:8080/health
+podman exec coolhurst-booker curl -fsS -i http://127.0.0.1:8080/health
+curl -ik https://tennis.tastic.uk/health
+curl -sS -i http://127.0.0.1:8082/health
 ```
 
-Do not rely on `curl http://localhost:8080/health` on the host unless a non-conflicting `PublishPort` was added (avoid `:8080`).
+`/health` returns **200** when both scrapers are fresh, otherwise **503** with a `message`.
 
-### 6. DNS / Traefik (user action)
+### 6. DNS / Traefik
 
-- Add Cloudflare DNS for `booker.mytestbed.co.uk` and `booker.tastic.uk` the same way other NUC services are pointed.
+- AdGuard rewrite: `tennis.tastic.uk` → NUC LAN IP (`192.168.7.123`).
 - Traefik discovers labels via the Podman socket; no static Traefik config change if labels and `Network=web` are correct.
-- Optional: add basic-auth middleware labels (see `traefik.container` in homelab-infra) so the UI is not public.
-- Oracle Caddy is not required for first bring-up.
 
 ### 7. Updates later
 
 ```bash
-cd ~/src/coolhurst-booker && git pull
+cd /path/to/coolhurst-booker && git pull
 podman build -t localhost/coolhurst-booker:latest .
 systemctl --user restart coolhurst-booker.service
 ```

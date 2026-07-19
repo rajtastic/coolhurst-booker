@@ -16,12 +16,15 @@ class Settings(BaseSettings):
     coolhurst_db_path: str = "./data/courts.db"
     playwright_headless: bool = True
     scrape_interval_seconds: int = 300
+    health_warn_after_seconds: int = 300
+    health_stale_after_seconds: int = 3600
 
     booker_name: str = "Roshan"
     google_appointment_url: str = ""
     coolhurst_book_url: str = (
         "https://coolhurst.clubsolution.co.uk/newlook/proc_baner.asp"
     )
+    show_public_court_calendar_link: bool = True
     google_username: str = ""
     google_password: str = ""
 

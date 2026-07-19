@@ -2,11 +2,12 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from coolhurst_booker.config import get_settings
@@ -83,17 +84,116 @@ def public_config() -> dict:
         "appointment_url": settings.google_appointment_url,
         "coolhurst_book_url": settings.coolhurst_book_url,
         "scrape_interval_seconds": settings.scrape_interval_seconds,
+        "health_warn_after_seconds": settings.health_warn_after_seconds,
+        "health_stale_after_seconds": settings.health_stale_after_seconds,
+        "show_public_court_calendar_link": settings.show_public_court_calendar_link,
+    }
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _scraper_health(
+    source: str,
+    *,
+    last_ok: dict | None,
+    latest: dict | None,
+    stale_after_seconds: int,
+    now: datetime,
+) -> dict:
+    label = "coolhurst" if source == "coolhurst" else "google"
+    last_success_at = last_ok.get("finished_at") if last_ok else None
+    finished = _parse_iso(last_success_at)
+    age_seconds: int | None = None
+    if finished is not None:
+        if finished.tzinfo is None:
+            finished = finished.replace(tzinfo=UTC)
+        age_seconds = max(0, int((now - finished).total_seconds()))
+
+    last_error = None
+    if latest and latest.get("status") == "error":
+        last_error = latest.get("error") or "unknown error"
+
+    if last_ok is None:
+        message = f"{label}: never succeeded"
+        if last_error:
+            message = f"{label}: never succeeded (last error: {last_error})"
+        return {
+            "ok": False,
+            "last_success_at": None,
+            "age_seconds": None,
+            "last_error": last_error,
+            "message": message,
+        }
+
+    assert age_seconds is not None
+    if age_seconds > stale_after_seconds:
+        message = f"{label}: last success {age_seconds}s ago (stale >{stale_after_seconds}s)"
+        if last_error and latest and latest.get("finished_at") != last_success_at:
+            message = f"{message}; last error: {last_error}"
+        return {
+            "ok": False,
+            "last_success_at": last_success_at,
+            "age_seconds": age_seconds,
+            "last_error": last_error,
+            "message": message,
+        }
+
+    return {
+        "ok": True,
+        "last_success_at": last_success_at,
+        "age_seconds": age_seconds,
+        "last_error": last_error,
+        "message": f"{label}: ok ({age_seconds}s ago)",
     }
 
 
 @app.get("/health")
-def health() -> dict:
+def health():
+    settings = get_settings()
     repo = get_repository()
-    return {
-        "status": "ok",
-        "last_scrape": repo.get_last_scrape(source="coolhurst"),
-        "last_google_scrape": repo.get_last_scrape(source="google"),
+    now = datetime.now(UTC)
+    stale_after = settings.health_stale_after_seconds
+
+    last_coolhurst = repo.get_last_scrape(source="coolhurst")
+    last_google = repo.get_last_scrape(source="google")
+    scrapers = {
+        "coolhurst": _scraper_health(
+            "coolhurst",
+            last_ok=last_coolhurst,
+            latest=repo.get_latest_scrape_run(source="coolhurst"),
+            stale_after_seconds=stale_after,
+            now=now,
+        ),
+        "google": _scraper_health(
+            "google",
+            last_ok=last_google,
+            latest=repo.get_latest_scrape_run(source="google"),
+            stale_after_seconds=stale_after,
+            now=now,
+        ),
     }
+    all_ok = all(s["ok"] for s in scrapers.values())
+    status = "ok" if all_ok else "degraded"
+    message = (
+        "Both scrapers healthy"
+        if all_ok
+        else "; ".join(s["message"] for s in scrapers.values() if not s["ok"])
+    )
+    body = {
+        "status": status,
+        "message": message,
+        "scrapers": scrapers,
+        "last_scrape": last_coolhurst,
+        "last_google_scrape": last_google,
+    }
+    return JSONResponse(content=body, status_code=200 if all_ok else 503)
 
 
 @app.get("/slots")

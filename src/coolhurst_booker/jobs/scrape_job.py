@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from coolhurst_booker.config import get_settings
 from coolhurst_booker.db.repository import get_repository
@@ -16,6 +17,12 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def _today_london() -> str:
+    return datetime.now(LONDON).date().isoformat()
 
 
 def run_coolhurst_scrape(once: bool = False) -> int:
@@ -36,7 +43,7 @@ def run_coolhurst_scrape(once: bool = False) -> int:
             slots = scrape_days(page, settings, parse_page)
             dates = sorted({s.date for s in slots if s.date})
 
-            repo.upsert_slots(slots, dates)
+            repo.upsert_slots(slots, dates, prune_before=_today_london())
             finished = datetime.now(UTC).isoformat()
             repo.finish_scrape_run(
                 run_id=run_id,
@@ -83,6 +90,26 @@ def run_google_scrape(once: bool = False) -> int:
     try:
         with browser_session(settings) as (_, __, ___, page):
             slots = scrape_google_appointments(page, settings)
+            previous_count = repo.count_person_slots()
+            if not slots and previous_count > 0:
+                finished = datetime.now(UTC).isoformat()
+                error = (
+                    f"Google scrape returned 0 slots but {previous_count} existing "
+                    "person slots were preserved"
+                )
+                repo.finish_scrape_run(
+                    run_id=run_id,
+                    finished_at=finished,
+                    days_scraped=settings.coolhurst_days_ahead,
+                    slots_found=0,
+                    status="error",
+                    error=error,
+                )
+                logger.warning(error)
+                if once:
+                    print(f"Preserved {previous_count} existing person slots (empty scrape)")
+                return previous_count
+
             repo.replace_person_slots(slots)
             finished = datetime.now(UTC).isoformat()
             repo.finish_scrape_run(

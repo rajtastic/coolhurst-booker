@@ -1,11 +1,12 @@
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install --no-cache-dir .
+# Pin Playwright to the browser revision shipped in this base image.
+RUN pip install --no-cache-dir . "playwright==1.61.0"
 
 ENV COOLHURST_DB_PATH=/data/courts.db
 ENV PLAYWRIGHT_HEADLESS=true

@@ -22,12 +22,15 @@
         </p>
       </div>
       <div class="hero-meta" id="meta-bar">
-        <span class="meta-pill" id="last-updated">Checking availability…</span>
+        <span class="meta-pill" id="last-updated-courts">Courts…</span>
+        <span class="meta-pill" id="last-updated-person">Calendar…</span>
         <span class="meta-pill meta-pill--accent" id="total-slots"></span>
       </div>
     </header>
 
     <main class="main">
+      <div class="source-banner hidden" id="source-banner" role="status"></div>
+
       <section class="filters" aria-label="Filters">
         <div class="filter-group">
           <span class="filter-label">Calendar</span>
@@ -70,6 +73,10 @@
 
     <footer class="footer">
       <p>Courts at <a href="https://coolhurst.clubsolution.co.uk/newlook/default.asp" target="_blank" rel="noopener">Coolhurst Tennis &amp; Squash Club</a>, London N8</p>
+      <p id="public-calendar-footer" class="footer-public hidden">
+        <a id="public-calendar-link" href="https://coolhurst.clubsolution.co.uk/newlook/proc_baner.asp" target="_blank" rel="noopener">Check Coolhurst court calendar</a>
+        <span class="footer-public__note"> — no login needed to view availability</span>
+      </p>
       <p class="footer-note" id="footer-note">Availability updates every 5 minutes · <a href="/docs">API</a></p>
     </footer>
   </div>
@@ -81,12 +88,17 @@
       <h2 id="book-modal-title">Book this slot</h2>
       <p class="modal__slot" id="book-modal-slot"></p>
       <ul class="modal__status" id="book-modal-status" aria-label="Availability"></ul>
+      <div class="modal__stale hidden" id="book-modal-stale" role="status"></div>
       <p class="modal__hint" id="book-modal-hint">
         Open both links to reserve the court and block time on the calendar.
       </p>
       <div class="modal__actions" id="book-modal-actions">
         <a class="btn btn--primary" id="book-appointment-link" href="#" target="_blank" rel="noopener">Book with host</a>
         <a class="btn btn--secondary" id="book-court-link" href="#" target="_blank" rel="noopener">Book court at Coolhurst</a>
+      </div>
+      <div class="modal__actions hidden" id="book-modal-verify">
+        <a class="btn btn--secondary hidden" id="verify-court-link" href="#" target="_blank" rel="noopener">Check Coolhurst calendar</a>
+        <a class="btn btn--secondary hidden" id="verify-person-link" href="#" target="_blank" rel="noopener">Check host availability</a>
       </div>
       <div class="modal__actions hidden" id="book-modal-fallback">
         <button type="button" class="btn btn--primary" id="switch-to-both">Show times when both are free</button>

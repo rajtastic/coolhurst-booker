@@ -12,12 +12,15 @@ const state = {
   surfaceFilter: "all",
   timeFilter: "all",
   calendarFilter: "both",
-  lastScrape: null,
+  health: null,
   config: {
     booker_name: "Roshan",
     appointment_url: "",
     coolhurst_book_url: "https://coolhurst.clubsolution.co.uk/newlook/proc_baner.asp",
     scrape_interval_seconds: 300,
+    health_warn_after_seconds: 300,
+    health_stale_after_seconds: 3600,
+    show_public_court_calendar_link: true,
   },
 };
 
@@ -25,8 +28,10 @@ const el = {
   dayStrip: document.getElementById("day-strip"),
   dayPanel: document.getElementById("day-panel"),
   loading: document.getElementById("loading"),
-  lastUpdated: document.getElementById("last-updated"),
+  lastUpdatedCourts: document.getElementById("last-updated-courts"),
+  lastUpdatedPerson: document.getElementById("last-updated-person"),
   totalSlots: document.getElementById("total-slots"),
+  sourceBanner: document.getElementById("source-banner"),
   surfaceFilters: document.getElementById("surface-filters"),
   timeFilters: document.getElementById("time-filters"),
   calendarFilters: document.getElementById("calendar-filters"),
@@ -34,14 +39,20 @@ const el = {
   heroTitle: document.getElementById("hero-title"),
   heroLead: document.getElementById("hero-lead"),
   footerNote: document.getElementById("footer-note"),
+  publicCalendarFooter: document.getElementById("public-calendar-footer"),
+  publicCalendarLink: document.getElementById("public-calendar-link"),
   bookModal: document.getElementById("book-modal"),
   bookModalSlot: document.getElementById("book-modal-slot"),
   bookModalStatus: document.getElementById("book-modal-status"),
   bookModalHint: document.getElementById("book-modal-hint"),
+  bookModalStale: document.getElementById("book-modal-stale"),
   bookModalActions: document.getElementById("book-modal-actions"),
+  bookModalVerify: document.getElementById("book-modal-verify"),
   bookModalFallback: document.getElementById("book-modal-fallback"),
   bookAppointmentLink: document.getElementById("book-appointment-link"),
   bookCourtLink: document.getElementById("book-court-link"),
+  verifyCourtLink: document.getElementById("verify-court-link"),
+  verifyPersonLink: document.getElementById("verify-person-link"),
   switchToBoth: document.getElementById("switch-to-both"),
   bookModalTitle: document.getElementById("book-modal-title"),
 };
@@ -81,9 +92,55 @@ function matchesSurfaceFilter(slot) {
   return getSurface(slot.court) === state.surfaceFilter;
 }
 
+function sourceAgeSeconds(source) {
+  const info = state.health?.scrapers?.[source];
+  if (!info) return null;
+  if (typeof info.age_seconds === "number") return info.age_seconds;
+  return null;
+}
+
+function sourceFreshness(source) {
+  const age = sourceAgeSeconds(source);
+  if (age == null) return "unknown";
+  const warn = state.config.health_warn_after_seconds || 300;
+  const stale = state.config.health_stale_after_seconds || 3600;
+  if (age > stale) return "stale";
+  if (age > warn) return "warn";
+  return "fresh";
+}
+
+function isSourceDegraded(source) {
+  const freshness = sourceFreshness(source);
+  if (freshness === "stale" || freshness === "unknown") return true;
+  if (source === "google" && state.personSlots.length === 0) return true;
+  if (source === "coolhurst" && state.slots.length === 0) return true;
+  return false;
+}
+
+function isSourceAging(source) {
+  const freshness = sourceFreshness(source);
+  return freshness === "warn" || freshness === "stale" || freshness === "unknown";
+}
+
+/** Effective display mode when Calendar filter is Both and one source is unavailable. */
+function bothEffectiveMode() {
+  const personBad = isSourceDegraded("google");
+  const courtsBad = isSourceDegraded("coolhurst");
+  if (!personBad && !courtsBad) return "both";
+  if (!courtsBad && personBad) return "courts";
+  if (!personBad && courtsBad) return "person";
+  return "both";
+}
+
+function activeDisplayMode() {
+  if (state.calendarFilter === "both") return bothEffectiveMode();
+  return state.calendarFilter;
+}
+
 function matchesCalendarFilter(slot) {
-  if (state.calendarFilter === "courts") return true;
-  if (state.calendarFilter === "both") return Boolean(slot.person_available);
+  const mode = activeDisplayMode();
+  if (mode === "courts") return true;
+  if (mode === "both") return Boolean(slot.person_available);
   return true;
 }
 
@@ -98,14 +155,14 @@ function filterPersonSlots(slots) {
 }
 
 function visibleSlotsForDate(date) {
-  if (state.calendarFilter === "person") {
+  if (activeDisplayMode() === "person") {
     return filterPersonSlots(state.personSlots.filter((s) => s.date === date));
   }
   return filterCourtSlots(state.slots.filter((s) => s.date === date));
 }
 
 function allVisibleSlots() {
-  if (state.calendarFilter === "person") {
+  if (activeDisplayMode() === "person") {
     return filterPersonSlots(state.personSlots);
   }
   return filterCourtSlots(state.slots);
@@ -141,7 +198,8 @@ function formatDateShort(dateStr) {
 
 function todayStr() {
   const now = new Date();
-  return now.toISOString().slice(0, 10);
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
 }
 
 function groupByTimeOfDay(slots) {
@@ -171,17 +229,20 @@ function courtLabel(slot) {
 }
 
 function stripDates() {
-  if (state.calendarFilter === "person") {
-    return [...new Set(state.personSlots.map((s) => s.date))].sort();
+  const today = todayStr();
+  if (activeDisplayMode() === "person") {
+    return [...new Set(state.personSlots.map((s) => s.date))]
+      .filter((d) => d >= today)
+      .sort();
   }
-  return state.summary.map((s) => s.date).sort();
+  return state.summary.map((s) => s.date).filter((d) => d >= today).sort();
 }
 
 function countForDate(date) {
-  if (state.calendarFilter === "person") {
+  if (activeDisplayMode() === "person") {
     return filterPersonSlots(state.personSlots.filter((s) => s.date === date)).length;
   }
-  if (state.calendarFilter === "both" || filtersActive()) {
+  if (activeDisplayMode() === "both" || filtersActive()) {
     return filterCourtSlots(state.slots.filter((s) => s.date === date)).length;
   }
   const summary = state.summary.find((s) => s.date === date);
@@ -213,6 +274,13 @@ function escapeAttr(value) {
     .replace(/</g, "&lt;");
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function intervalsOverlap(aStart, aEnd, bStart, bEnd) {
   return parseTime(aStart) < parseTime(bEnd) && parseTime(aEnd) > parseTime(bStart);
 }
@@ -230,21 +298,21 @@ function courtsFreeAt(date, start, end) {
 }
 
 function availabilityForSlot(slot) {
-  const mode = slot.mode || state.calendarFilter;
+  const mode = slot.mode || activeDisplayMode();
   if (mode === "both") {
     return { person: true, court: true, matchingCourts: slot.court ? [slot] : [] };
   }
   if (mode === "courts") {
-    const person = slot.person_available === true || slot.person_available === "true"
-      ? true
-      : personFreeAt(slot.date, slot.start_time, slot.end_time);
+    const person =
+      slot.person_available === true || slot.person_available === "true"
+        ? true
+        : personFreeAt(slot.date, slot.start_time, slot.end_time);
     return {
       person,
       court: true,
       matchingCourts: slot.court ? [slot] : courtsFreeAt(slot.date, slot.start_time, slot.end_time),
     };
   }
-  // person mode: person window → check overlapping free courts
   const matchingCourts = courtsFreeAt(slot.date, slot.start_time, slot.end_time);
   return {
     person: true,
@@ -256,7 +324,7 @@ function availabilityForSlot(slot) {
 function statusItem(label, ok) {
   return `<li class="modal__status-item modal__status-item--${ok ? "ok" : "no"}">
     <span class="modal__status-mark" aria-hidden="true">${ok ? "✓" : "×"}</span>
-    <span>${label}</span>
+    <span>${escapeHtml(label)}</span>
   </li>`;
 }
 
@@ -269,31 +337,61 @@ function selectCalendarFilter(filter) {
   refreshViews();
 }
 
+function slotStaleClass(forCourts, forPerson) {
+  const courtsAging = forCourts && isSourceAging("coolhurst");
+  const personAging = forPerson && isSourceAging("google");
+  if (
+    (courtsAging && sourceFreshness("coolhurst") === "stale") ||
+    (personAging && sourceFreshness("google") === "stale")
+  ) {
+    return "slot-card--stale";
+  }
+  if (courtsAging || personAging) return "slot-card--warn";
+  return "";
+}
+
 function renderCourtSlotCard(slot) {
   const surface = getSurface(slot.court);
   const { courtName, detail } = courtLabel(slot);
-  const mode = state.calendarFilter;
+  const mode = activeDisplayMode();
   const clickable = mode === "both" || mode === "courts";
+  const staleClass = slotStaleClass(true, mode === "both");
   const attrs = clickable
-    ? `role="button" tabindex="0" data-mode="${mode}" data-slot-date="${slot.date}" data-slot-start="${slot.start_time}" data-slot-end="${slot.end_time}" data-slot-court="${escapeAttr(slot.court)}" data-person-available="${slot.person_available ? "true" : "false"}" class="slot-card slot-card--clickable"`
-    : 'class="slot-card"';
+    ? `role="button" tabindex="0" data-mode="${mode}" data-slot-date="${slot.date}" data-slot-start="${slot.start_time}" data-slot-end="${slot.end_time}" data-slot-court="${escapeAttr(slot.court)}" data-person-available="${slot.person_available ? "true" : "false"}" class="slot-card slot-card--clickable ${staleClass}"`
+    : `class="slot-card ${staleClass}"`;
+
+  const staleNote =
+    staleClass === "slot-card--stale"
+      ? `<span class="slot-card__stale">May be outdated</span>`
+      : staleClass === "slot-card--warn"
+        ? `<span class="slot-card__stale slot-card__stale--warn">Check freshness</span>`
+        : "";
 
   return `
     <article ${attrs}>
       <div class="slot-card__time">${formatTimeRange(slot.start_time, slot.end_time)}</div>
       <div class="slot-card__court">${courtName}${detail ? ` · ${detail}` : ""}</div>
       <span class="surface-badge surface-badge--${surface}">${surfaceLabel(surface)}</span>
+      ${staleNote}
     </article>
   `;
 }
 
 function renderPersonSlotCard(slot) {
   const name = state.config.booker_name;
+  const staleClass = slotStaleClass(false, true);
+  const staleNote =
+    staleClass === "slot-card--stale"
+      ? `<span class="slot-card__stale">May be outdated</span>`
+      : staleClass === "slot-card--warn"
+        ? `<span class="slot-card__stale slot-card__stale--warn">Check freshness</span>`
+        : "";
   return `
-    <article role="button" tabindex="0" data-mode="person" data-slot-date="${slot.date}" data-slot-start="${slot.start_time}" data-slot-end="${slot.end_time}" class="slot-card slot-card--clickable">
+    <article role="button" tabindex="0" data-mode="person" data-slot-date="${slot.date}" data-slot-start="${slot.start_time}" data-slot-end="${slot.end_time}" class="slot-card slot-card--clickable ${staleClass}">
       <div class="slot-card__time">${formatTimeRange(slot.start_time, slot.end_time)}</div>
-      <div class="slot-card__court">${name} free</div>
+      <div class="slot-card__court">${escapeHtml(name)} free</div>
       <span class="surface-badge surface-badge--astro">Calendar</span>
+      ${staleNote}
     </article>
   `;
 }
@@ -319,14 +417,72 @@ function bindSlotClicks() {
   });
 }
 
+function updateSourceBanner() {
+  const name = state.config.booker_name || "Roshan";
+  const personBad = isSourceDegraded("google");
+  const courtsBad = isSourceDegraded("coolhurst");
+  const filter = state.calendarFilter;
+  let message = "";
+
+  if (filter === "both") {
+    if (!personBad && !courtsBad) {
+      message = "";
+    } else if (!courtsBad && personBad) {
+      message = `Showing courts only — ${name}'s calendar is empty or out of date.`;
+    } else if (!personBad && courtsBad) {
+      message = `Showing ${name}'s availability only — Coolhurst courts data is empty or out of date.`;
+    } else {
+      message = "Both calendars are empty or out of date. Verify on the source sites before booking.";
+    }
+  } else if (filter === "courts" && courtsBad) {
+    message = "Coolhurst courts data is empty or out of date.";
+  } else if (filter === "person" && personBad) {
+    message = `${name}'s calendar is empty or out of date.`;
+  }
+
+  if (!message) {
+    el.sourceBanner.classList.add("hidden");
+    el.sourceBanner.innerHTML = "";
+    return;
+  }
+
+  const coolhurstUrl = state.config.coolhurst_book_url;
+  const appointmentUrl = state.config.appointment_url;
+  const showPublic = state.config.show_public_court_calendar_link;
+  const links = [];
+  if ((courtsBad || filter === "courts") && showPublic && coolhurstUrl) {
+    links.push(
+      `<a href="${escapeAttr(coolhurstUrl)}" target="_blank" rel="noopener">Check Coolhurst court calendar</a>`
+    );
+  }
+  if ((personBad || filter === "person") && appointmentUrl) {
+    links.push(
+      `<a href="${escapeAttr(appointmentUrl)}" target="_blank" rel="noopener">Check ${escapeHtml(name)}'s availability</a>`
+    );
+  }
+
+  el.sourceBanner.classList.remove("hidden");
+  el.sourceBanner.innerHTML = `<p>${escapeHtml(message)}</p>${
+    links.length ? `<p class="source-banner__links">${links.join(" · ")}</p>` : ""
+  }`;
+}
+
 function renderDayPanel() {
   const date = state.selectedDate;
+  const displayMode = activeDisplayMode();
   if (!date) {
+    const showPublic = state.config.show_public_court_calendar_link;
+    const coolhurstUrl = state.config.coolhurst_book_url;
     el.dayPanel.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">🎾</div>
         <h3>No slots to show</h3>
         <p>Wait for the next scrape, or switch Calendar filters.</p>
+        ${
+          showPublic && coolhurstUrl
+            ? `<p><a href="${escapeAttr(coolhurstUrl)}" target="_blank" rel="noopener">Check Coolhurst court calendar</a></p>`
+            : ""
+        }
       </div>
     `;
     return;
@@ -336,8 +492,7 @@ function renderDayPanel() {
   const groups = groupByTimeOfDay(daySlots);
   const short = formatDateShort(date);
   const name = state.config.booker_name;
-  const renderCard =
-    state.calendarFilter === "person" ? renderPersonSlotCard : renderCourtSlotCard;
+  const renderCard = displayMode === "person" ? renderPersonSlotCard : renderCourtSlotCard;
 
   let sections = "";
   for (const [key, bucket] of Object.entries(TIME_BUCKETS)) {
@@ -358,9 +513,9 @@ function renderDayPanel() {
   let subtitle;
   if (daySlots.length === 0) {
     subtitle = "No slots match your filters";
-  } else if (state.calendarFilter === "both") {
+  } else if (displayMode === "both") {
     subtitle = `${daySlots.length} slot${daySlots.length === 1 ? "" : "s"} free for you and ${name}`;
-  } else if (state.calendarFilter === "person") {
+  } else if (displayMode === "person") {
     subtitle = `${daySlots.length} open window${daySlots.length === 1 ? "" : "s"} on ${name}'s calendar`;
   } else {
     subtitle = `${daySlots.length} court${daySlots.length === 1 ? "" : "s"} available`;
@@ -382,9 +537,9 @@ function renderDayPanel() {
   }
 
   let hint = "tap a court to check if it's free for both of you";
-  if (state.calendarFilter === "both") {
+  if (displayMode === "both") {
     hint = `tap a time to book with ${name} and reserve a court`;
-  } else if (state.calendarFilter === "person") {
+  } else if (displayMode === "person") {
     hint = `tap a time to see if a court is free then`;
   }
 
@@ -401,7 +556,7 @@ function renderDayPanel() {
 
 function openBookModal(slot) {
   const name = state.config.booker_name;
-  const mode = slot.mode || state.calendarFilter;
+  const mode = slot.mode || activeDisplayMode();
   const avail = availabilityForSlot(slot);
   const bothFree = avail.person && avail.court;
   const { courtName, detail } = courtLabel(slot);
@@ -440,6 +595,46 @@ function openBookModal(slot) {
   el.bookAppointmentLink.textContent = `Book with ${name}`;
   el.bookAppointmentLink.href = state.config.appointment_url || "#";
   el.bookCourtLink.href = state.config.coolhurst_book_url || "#";
+
+  const courtsAging = isSourceAging("coolhurst");
+  const personAging = isSourceAging("google");
+  const staleNotes = [];
+  if (courtsAging) {
+    const label =
+      sourceFreshness("coolhurst") === "stale" ? "out of date" : "may be aging";
+    staleNotes.push(`Coolhurst courts data is ${label}.`);
+  }
+  if (personAging) {
+    const label = sourceFreshness("google") === "stale" ? "out of date" : "may be aging";
+    staleNotes.push(`${name}'s calendar is ${label}.`);
+  }
+
+  if (staleNotes.length) {
+    el.bookModalStale.classList.remove("hidden");
+    el.bookModalStale.classList.toggle(
+      "modal__stale--stale",
+      sourceFreshness("coolhurst") === "stale" || sourceFreshness("google") === "stale"
+    );
+    el.bookModalStale.classList.toggle(
+      "modal__stale--warn",
+      !(sourceFreshness("coolhurst") === "stale" || sourceFreshness("google") === "stale")
+    );
+    el.bookModalStale.textContent = `${staleNotes.join(" ")} Confirm on the source site before booking.`;
+  } else {
+    el.bookModalStale.classList.add("hidden");
+    el.bookModalStale.textContent = "";
+  }
+
+  const showVerifyCourt =
+    courtsAging && state.config.show_public_court_calendar_link && state.config.coolhurst_book_url;
+  const showVerifyPerson = personAging && state.config.appointment_url;
+
+  el.verifyCourtLink.href = state.config.coolhurst_book_url || "#";
+  el.verifyPersonLink.href = state.config.appointment_url || "#";
+  el.verifyPersonLink.textContent = `Check ${name}'s availability`;
+  el.verifyCourtLink.classList.toggle("hidden", !showVerifyCourt);
+  el.verifyPersonLink.classList.toggle("hidden", !showVerifyPerson);
+  el.bookModalVerify.classList.toggle("hidden", !showVerifyCourt && !showVerifyPerson);
 
   if (bothFree) {
     el.bookModalHint.textContent = `Reserve the court at Coolhurst, then book time with ${name} on the appointment page.`;
@@ -503,28 +698,48 @@ function renderDayStrip() {
   });
 }
 
-function updateMeta() {
-  if (state.lastScrape?.finished_at) {
-    const when = new Date(state.lastScrape.finished_at);
-    const ago = formatRelative(when);
-    el.lastUpdated.textContent = `Updated ${ago}`;
-  } else {
-    el.lastUpdated.textContent = "Waiting for first scrape…";
+function formatRelative(date) {
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`;
+  return date.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function setFreshnessPill(node, label, source) {
+  const info = state.health?.scrapers?.[source];
+  const freshness = sourceFreshness(source);
+  node.classList.remove("meta-pill--warn", "meta-pill--stale", "meta-pill--unknown");
+
+  if (!info?.last_success_at) {
+    node.textContent = `${label}: waiting…`;
+    node.classList.add("meta-pill--unknown");
+    return;
   }
+
+  const when = new Date(info.last_success_at);
+  const ago = formatRelative(when);
+  node.textContent = `${label}: ${ago}`;
+  if (freshness === "stale") node.classList.add("meta-pill--stale");
+  else if (freshness === "warn") node.classList.add("meta-pill--warn");
+  else if (freshness === "unknown") node.classList.add("meta-pill--unknown");
+}
+
+function updateMeta() {
+  const name = state.config.booker_name || "Roshan";
+  setFreshnessPill(el.lastUpdatedCourts, "Courts", "coolhurst");
+  setFreshnessPill(el.lastUpdatedPerson, name, "google");
 
   const total = allVisibleSlots().length;
   const label = filtersActive()
     ? `${total} matching slots`
     : `${state.slots.length} slots in next 2 weeks`;
   el.totalSlots.textContent = label;
-}
-
-function formatRelative(date) {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`;
-  return date.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function applyConfig() {
@@ -534,11 +749,22 @@ function applyConfig() {
   el.heroLead.textContent = `Outdoor courts at Coolhurst that line up with ${name}'s appointment availability over the next two weeks. Use Calendar · Both for times that work for both of you.`;
   el.chipPerson.textContent = name;
   const mins = state.config.scrape_interval_seconds || 300;
-  const label = mins >= 60 ? `${Math.round(mins / 60)} minute${mins === 60 ? "" : "s"}` : `${mins} seconds`;
+  const label =
+    mins >= 60 ? `${Math.round(mins / 60)} minute${mins === 60 ? "" : "s"}` : `${mins} seconds`;
   el.footerNote.innerHTML = `Availability updates every ${label} · <a href="/docs">API</a>`;
+
+  const showPublic = state.config.show_public_court_calendar_link;
+  const coolhurstUrl = state.config.coolhurst_book_url;
+  if (showPublic && coolhurstUrl) {
+    el.publicCalendarFooter.classList.remove("hidden");
+    el.publicCalendarLink.href = coolhurstUrl;
+  } else {
+    el.publicCalendarFooter.classList.add("hidden");
+  }
 }
 
 function refreshViews() {
+  updateSourceBanner();
   renderDayStrip();
   renderDayPanel();
   updateMeta();
@@ -605,16 +831,23 @@ async function loadData() {
     const fromEndpoint = personRes.ok ? (await personRes.json()).slots || [] : [];
     state.personSlots = fromEndpoint.length ? fromEndpoint : fromSlots;
     state.summary = summaryData.summary || [];
-    state.lastScrape = healthData.last_scrape || healthData.last_google_scrape;
+    state.health = healthData;
 
     el.loading.classList.add("hidden");
     refreshViews();
   } catch (err) {
     el.loading.classList.add("hidden");
+    const coolhurstUrl = state.config.coolhurst_book_url;
+    const showPublic = state.config.show_public_court_calendar_link;
     el.dayPanel.innerHTML = `
       <div class="error-state">
         <h3>Couldn't load courts</h3>
-        <p>${err.message}. The scraper may still be running — try refreshing in a few minutes.</p>
+        <p>${escapeHtml(err.message)}. The scraper may still be running — try refreshing in a few minutes.</p>
+        ${
+          showPublic && coolhurstUrl
+            ? `<p><a href="${escapeAttr(coolhurstUrl)}" target="_blank" rel="noopener">Check Coolhurst court calendar</a></p>`
+            : ""
+        }
       </div>
     `;
   }
