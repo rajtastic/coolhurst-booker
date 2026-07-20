@@ -17,11 +17,17 @@ COOKIE_ACCEPT_SELECTORS = [
     "button:has-text('Accept all')",
 ]
 
+LAUNCH_TIMEOUT_MS = 30_000
+DEFAULT_TIMEOUT_MS = 30_000
+
 
 @contextmanager
 def browser_session(settings: Settings) -> Generator[tuple[Playwright, Browser, BrowserContext, Page], None, None]:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=settings.playwright_headless)
+        browser = playwright.chromium.launch(
+            headless=settings.playwright_headless,
+            timeout=LAUNCH_TIMEOUT_MS,
+        )
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -29,11 +35,43 @@ def browser_session(settings: Settings) -> Generator[tuple[Playwright, Browser, 
             )
         )
         page = context.new_page()
+        page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+        page.set_default_navigation_timeout(DEFAULT_TIMEOUT_MS)
         try:
             yield playwright, browser, context, page
         finally:
-            context.close()
-            browser.close()
+            for closer, label in ((context.close, "context"), (browser.close, "browser")):
+                try:
+                    closer()
+                except Exception:
+                    logger.warning("Failed to close Playwright %s", label, exc_info=True)
+
+
+def force_kill_playwright_browsers() -> None:
+    """Best-effort kill of Chromium/Playwright driver children to unblock hung scrapes."""
+    import subprocess
+
+    killed_any = False
+    for pattern in (
+        "chrome-headless-shell",
+        "chromium_headless_shell",
+        "playwright/driver/node",
+        "ms-playwright",
+    ):
+        try:
+            result = subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            # pkill returns 0 if it signalled at least one process
+            if result.returncode == 0:
+                killed_any = True
+        except Exception:
+            logger.debug("pkill %s failed", pattern, exc_info=True)
+    if killed_any:
+        logger.warning("Force-killed Playwright/Chromium process(es) after scrape timeout")
 
 
 def dismiss_cookie_banner(page: Page) -> None:

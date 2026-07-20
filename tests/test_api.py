@@ -105,6 +105,7 @@ def test_config_endpoint(client):
     assert data["booker_name"] == "Roshan"
     assert "appointments" in data["appointment_url"]
     assert data["scrape_interval_seconds"] == 300
+    assert data["scrape_timeout_seconds"] == 240
     assert data["health_warn_after_seconds"] == 300
     assert data["health_stale_after_seconds"] == 3600
     assert data["show_public_court_calendar_link"] is True
@@ -299,3 +300,69 @@ def test_google_empty_scrape_preserves_person_slots(tmp_path, monkeypatch):
     assert latest is not None
     assert latest["status"] == "error"
     assert "preserved" in (latest["error"] or "").lower()
+
+
+def test_abandon_running_scrapes(tmp_path):
+    from datetime import UTC, datetime
+
+    repo = CourtRepository(str(tmp_path / "abandon.db"))
+    run_a = repo.start_scrape_run(datetime.now(UTC).isoformat(), source="coolhurst")
+    run_b = repo.start_scrape_run(datetime.now(UTC).isoformat(), source="google")
+    finished = repo.start_scrape_run(datetime.now(UTC).isoformat(), source="coolhurst")
+    repo.finish_scrape_run(
+        run_id=finished,
+        finished_at=datetime.now(UTC).isoformat(),
+        days_scraped=1,
+        slots_found=1,
+        status="ok",
+    )
+
+    n = repo.abandon_running_scrapes(
+        finished_at=datetime.now(UTC).isoformat(),
+        error="abandoned: process restart",
+    )
+    assert n == 2
+    for run_id in (run_a, run_b):
+        with repo._connect() as conn:
+            row = dict(conn.execute("SELECT * FROM scrape_runs WHERE id = ?", (run_id,)).fetchone())
+        assert row["status"] == "error"
+        assert "abandoned" in row["error"]
+    latest_ok = repo.get_last_scrape(source="coolhurst")
+    assert latest_ok is not None
+    assert latest_ok["id"] == finished
+
+
+def test_scheduled_scrape_watchdog_timeout(tmp_path, monkeypatch):
+    import time
+
+    from coolhurst_booker.api import main as api_main
+
+    db_path = str(tmp_path / "watchdog.db")
+    monkeypatch.setenv("COOLHURST_DB_PATH", db_path)
+    monkeypatch.setenv("SCRAPE_TIMEOUT_SECONDS", "1")
+
+    repo = CourtRepository(db_path)
+    run_id = repo.start_scrape_run("2026-07-20T19:13:00+00:00", source="google")
+    assert repo.get_latest_scrape_run(source="google") is None  # still running, not finished
+
+    def hang_forever():
+        # Leave a running row as a real hung scrape would; then block.
+        time.sleep(30)
+
+    with (
+        patch.object(api_main, "run_scrape", side_effect=hang_forever),
+        patch.object(api_main, "force_kill_playwright_browsers") as kill_mock,
+    ):
+        started = time.monotonic()
+        api_main._scheduled_scrape()
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 8
+    kill_mock.assert_called_once()
+    with repo._connect() as conn:
+        row = dict(conn.execute("SELECT * FROM scrape_runs WHERE id = ?", (run_id,)).fetchone())
+    assert row["status"] == "error"
+    assert "timeout" in (row["error"] or "").lower()
+    # Lock must be released so a subsequent scrape can start.
+    assert api_main._scrape_lock.acquire(blocking=False)
+    api_main._scrape_lock.release()

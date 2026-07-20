@@ -58,22 +58,26 @@ def advance_one_day(page: Page) -> str | None:
         ".daypaging span:has-text('1 day')",
     ]
 
-    clicked = False
-    for selector in forward_selectors:
-        try:
-            target = page.locator(selector).last
-            if target.count() > 0 and target.is_visible(timeout=2000):
-                target.click()
-                clicked = True
-                break
-        except Exception:
-            continue
-
-    if not clicked:
+    def _click_forward() -> None:
+        for selector in forward_selectors:
+            try:
+                target = page.locator(selector).last
+                if target.count() > 0 and target.is_visible(timeout=2000):
+                    target.click()
+                    return
+            except Exception:
+                continue
         raise RuntimeError("Could not find '1 day' forward navigation control")
 
+    _click_forward()
     page.wait_for_timeout(2000)
-    wait_for_grid(page)
+    try:
+        wait_for_grid(page)
+    except Exception:
+        logger.warning("Grid wait failed after day advance; retrying forward click once")
+        _click_forward()
+        page.wait_for_timeout(2000)
+        wait_for_grid(page)
 
     after = read_page_date(page)
     if after and before and after == before:

@@ -104,6 +104,25 @@ class CourtRepository:
             )
             conn.commit()
 
+    def abandon_running_scrapes(
+        self,
+        finished_at: str,
+        error: str = "abandoned: scrape timeout",
+    ) -> int:
+        """Mark any in-flight scrape_runs as errors so they cannot block forever."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE scrape_runs
+                SET finished_at = ?, days_scraped = 0, slots_found = 0,
+                    status = 'error', error = ?
+                WHERE status = 'running'
+                """,
+                (finished_at, error),
+            )
+            conn.commit()
+            return int(cursor.rowcount)
+
     def upsert_slots(
         self,
         slots: list[CourtSlot],

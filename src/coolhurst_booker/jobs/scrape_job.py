@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -19,13 +20,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 LONDON = ZoneInfo("Europe/London")
+MAX_ATTEMPTS = 2
+RETRY_BACKOFF_SECONDS = 2.0
 
 
 def _today_london() -> str:
     return datetime.now(LONDON).date().isoformat()
 
 
-def run_coolhurst_scrape(once: bool = False) -> int:
+def _is_retryable(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    retry_markers = (
+        "timeout",
+        "err_aborted",
+        "err_network",
+        "err_connection",
+        "err_name_not_resolved",
+        "net::",
+        "navigation",
+        "frame was detached",
+        "target closed",
+        "browser has been closed",
+    )
+    return any(m in msg for m in retry_markers)
+
+
+def _with_retries(label: str, fn, *, once: bool = False):
+    last_exc: BaseException | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            logger.warning(
+                "%s attempt %d/%d failed (%s); retrying in %.0fs",
+                label,
+                attempt,
+                MAX_ATTEMPTS,
+                exc,
+                RETRY_BACKOFF_SECONDS,
+            )
+            time.sleep(RETRY_BACKOFF_SECONDS)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _run_coolhurst_once(once: bool = False) -> int:
     settings = get_settings()
     repo = get_repository(settings)
     result_started = datetime.now(UTC).isoformat()
@@ -81,7 +123,11 @@ def run_coolhurst_scrape(once: bool = False) -> int:
         raise
 
 
-def run_google_scrape(once: bool = False) -> int:
+def run_coolhurst_scrape(once: bool = False) -> int:
+    return _with_retries("Coolhurst", lambda: _run_coolhurst_once(once=once), once=once)
+
+
+def _run_google_once(once: bool = False) -> int:
     settings = get_settings()
     repo = get_repository(settings)
     result_started = datetime.now(UTC).isoformat()
@@ -139,6 +185,10 @@ def run_google_scrape(once: bool = False) -> int:
         )
         logger.exception("Google appointment scrape failed")
         raise
+
+
+def run_google_scrape(once: bool = False) -> int:
+    return _with_retries("Google", lambda: _run_google_once(once=once), once=once)
 
 
 def run_scrape(once: bool = False) -> dict[str, int | None]:

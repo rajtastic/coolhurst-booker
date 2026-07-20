@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from coolhurst_booker.config import get_settings
 from coolhurst_booker.db.repository import get_repository
 from coolhurst_booker.jobs.scrape_job import run_scrape
+from coolhurst_booker.scraper.browser import force_kill_playwright_browsers
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,52 @@ _scrape_lock = threading.Lock()
 _scheduler: BackgroundScheduler | None = None
 
 
+def _abandon_running(reason: str) -> None:
+    try:
+        repo = get_repository()
+        n = repo.abandon_running_scrapes(
+            finished_at=datetime.now(UTC).isoformat(),
+            error=reason,
+        )
+        if n:
+            logger.warning("Abandoned %d running scrape_runs (%s)", n, reason)
+    except Exception:
+        logger.exception("Failed to abandon running scrape_runs")
+
+
 def _scheduled_scrape() -> None:
     if not _scrape_lock.acquire(blocking=False):
         logger.info("Skipping scrape: previous run still in progress")
         return
+
+    settings = get_settings()
+    timeout = settings.scrape_timeout_seconds
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            run_scrape()
+        except BaseException as exc:  # noqa: BLE001 — capture for outer logger
+            errors.append(exc)
+        finally:
+            done.set()
+
     try:
-        run_scrape()
-    except Exception:
-        logger.exception("Scheduled scrape failed")
+        worker = threading.Thread(target=_worker, name="scrape-worker", daemon=True)
+        worker.start()
+        if not done.wait(timeout):
+            logger.error(
+                "Scrape exceeded %ss; abandoning worker and killing Playwright browsers",
+                timeout,
+            )
+            force_kill_playwright_browsers()
+            _abandon_running("abandoned: scrape timeout")
+            # Brief grace for the worker to notice killed browsers and exit.
+            done.wait(2)
+            return
+        if errors:
+            logger.exception("Scheduled scrape failed", exc_info=errors[0])
     finally:
         _scrape_lock.release()
 
@@ -40,6 +79,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     if not os.environ.get("PYTEST_CURRENT_TEST"):
+        _abandon_running("abandoned: process restart")
         _scheduler = BackgroundScheduler()
         _scheduler.add_job(
             _scheduled_scrape,
@@ -50,7 +90,11 @@ async def lifespan(app: FastAPI):
             coalesce=True,
         )
         _scheduler.start()
-        logger.info("Scheduler started (interval=%ss)", settings.scrape_interval_seconds)
+        logger.info(
+            "Scheduler started (interval=%ss, timeout=%ss)",
+            settings.scrape_interval_seconds,
+            settings.scrape_timeout_seconds,
+        )
         threading.Thread(target=_scheduled_scrape, daemon=True).start()
 
     yield
@@ -84,6 +128,7 @@ def public_config() -> dict:
         "appointment_url": settings.google_appointment_url,
         "coolhurst_book_url": settings.coolhurst_book_url,
         "scrape_interval_seconds": settings.scrape_interval_seconds,
+        "scrape_timeout_seconds": settings.scrape_timeout_seconds,
         "health_warn_after_seconds": settings.health_warn_after_seconds,
         "health_stale_after_seconds": settings.health_stale_after_seconds,
         "show_public_court_calendar_link": settings.show_public_court_calendar_link,

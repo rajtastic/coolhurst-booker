@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     coolhurst_db_path: str = "./data/courts.db"
     playwright_headless: bool = True
     scrape_interval_seconds: int = 300
+    scrape_timeout_seconds: int = 240
     health_warn_after_seconds: int = 300
     health_stale_after_seconds: int = 3600
 
