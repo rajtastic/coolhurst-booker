@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -53,6 +54,18 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
     reap_child_zombies()
 
 
+def _log_scrape_tail(log_path: Path, *, limit: int = 40) -> None:
+    try:
+        if not log_path.is_file():
+            return
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in lines[-limit:]:
+            if line.strip():
+                logger.info("[scrape] %s", line)
+    except OSError:
+        logger.debug("Could not read scrape log %s", log_path, exc_info=True)
+
+
 def _scheduled_scrape() -> None:
     """Run scrapes in an isolated subprocess so Chromium children are always reaped."""
     if not _scrape_lock.acquire(blocking=False):
@@ -63,17 +76,30 @@ def _scheduled_scrape() -> None:
     timeout = settings.scrape_timeout_seconds
     cmd = [sys.executable, "-m", "coolhurst_booker.jobs.scrape_job", "--once"]
     proc: subprocess.Popen | None = None
+    log_path: Path | None = None
+    log_fh = None
 
     try:
+        log_fh = tempfile.NamedTemporaryFile(
+            prefix="coolhurst-scrape-",
+            suffix=".log",
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        )
+        log_path = Path(log_fh.name)
         proc = subprocess.Popen(
             cmd,
             start_new_session=True,
-            stdout=subprocess.PIPE,
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
         )
+        # Parent no longer writes; child keeps the fd. Close our handle so wait/unlink is clean.
+        log_fh.close()
+        log_fh = None
         try:
-            stdout, _ = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             logger.error(
                 "Scrape subprocess exceeded %ss; killing process group %s",
@@ -84,10 +110,6 @@ def _scheduled_scrape() -> None:
             _abandon_running("abandoned: scrape timeout")
             return
 
-        if stdout:
-            for line in stdout.strip().splitlines()[-40:]:
-                logger.info("[scrape] %s", line)
-
         if proc.returncode and proc.returncode != 0:
             logger.error("Scrape subprocess exited with code %s", proc.returncode)
     except Exception:
@@ -96,6 +118,17 @@ def _scheduled_scrape() -> None:
             _kill_process_group(proc)
             _abandon_running("abandoned: scrape subprocess error")
     finally:
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+        if log_path is not None:
+            _log_scrape_tail(log_path)
+            try:
+                log_path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Could not delete scrape log %s", log_path, exc_info=True)
         reap_child_zombies()
         _scrape_lock.release()
 

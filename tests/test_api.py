@@ -370,13 +370,14 @@ def test_scheduled_scrape_uses_subprocess_and_kills_on_timeout(tmp_path, monkeyp
     class FakeProc:
         pid = 4242
         returncode = None
-
-        def communicate(self, timeout=None):
-            import subprocess
-
-            raise subprocess.TimeoutExpired(cmd=["scrape"], timeout=timeout)
+        _waits = 0
 
         def wait(self, timeout=None):
+            import subprocess
+
+            self._waits += 1
+            if self._waits == 1:
+                raise subprocess.TimeoutExpired(cmd=["scrape"], timeout=timeout)
             self.returncode = -9
             return self.returncode
 
@@ -394,6 +395,7 @@ def test_scheduled_scrape_uses_subprocess_and_kills_on_timeout(tmp_path, monkeyp
 
     popen_mock.assert_called_once()
     assert popen_mock.call_args.kwargs.get("start_new_session") is True
+    assert popen_mock.call_args.kwargs.get("stdout") is not None
     killpg_mock.assert_called_once()
     force_kill_mock.assert_called()
     reap_mock.assert_called()
@@ -416,8 +418,8 @@ def test_scheduled_scrape_subprocess_success(tmp_path, monkeypatch):
         pid = 99
         returncode = 0
 
-        def communicate(self, timeout=None):
-            return ("Found 1 available court slots\n", None)
+        def wait(self, timeout=None):
+            return 0
 
         def poll(self):
             return self.returncode
@@ -431,5 +433,17 @@ def test_scheduled_scrape_subprocess_success(tmp_path, monkeypatch):
     popen_mock.assert_called_once()
     args = popen_mock.call_args.args[0]
     assert args[-2:] == ["coolhurst_booker.jobs.scrape_job", "--once"]
+    assert popen_mock.call_args.kwargs.get("stdout") is not None
     assert api_main._scrape_lock.acquire(blocking=False)
     api_main._scrape_lock.release()
+
+
+def test_sqlite_wal_mode_enabled(tmp_path):
+    repo = CourtRepository(str(tmp_path / "wal.db"))
+    with repo._connect() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
+    with repo._connect() as conn:
+        # Second connection still sees WAL (DB-level setting).
+        mode2 = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode2).lower() == "wal"

@@ -90,10 +90,19 @@ Label=traefik.http.services.coolhurst-svc.loadbalancer.server.port=8080
 
 [Service]
 Restart=always
-RuntimeMaxSec=86400
+TimeoutStopSec=90
 
 [Install]
 WantedBy=default.target
+```
+
+Also enable the daily 04:00 recycle timer (units in `homelab/nuc12/systemd/`):
+
+```bash
+ln -sfn ~/GitHub/homelab/nuc12/systemd/coolhurst-booker-restart.service ~/.config/systemd/user/
+ln -sfn ~/GitHub/homelab/nuc12/systemd/coolhurst-booker-restart.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now coolhurst-booker-restart.timer
 ```
 
 Also add Caddy on the Oracle VM (`homelab/vm/Caddyfile`):
