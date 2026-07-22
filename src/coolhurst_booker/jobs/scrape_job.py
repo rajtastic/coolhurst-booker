@@ -8,7 +8,13 @@ from zoneinfo import ZoneInfo
 from coolhurst_booker.config import get_settings
 from coolhurst_booker.db.repository import get_repository
 from coolhurst_booker.scraper.auth import login
-from coolhurst_booker.scraper.browser import browser_session, dismiss_cookie_banner, wait_for_grid
+from coolhurst_booker.scraper.browser import (
+    browser_session,
+    cleanup_playwright_state,
+    dismiss_cookie_banner,
+    force_kill_playwright_browsers,
+    wait_for_grid,
+)
 from coolhurst_booker.scraper.google_appointments import scrape_google_appointments
 from coolhurst_booker.scraper.navigation import scrape_days, select_booking_area
 from coolhurst_booker.scraper.parser import parse_page
@@ -41,8 +47,15 @@ def _is_retryable(exc: BaseException) -> bool:
         "frame was detached",
         "target closed",
         "browser has been closed",
+        "sigtrap",
+        "browsertype.launch",
     )
     return any(m in msg for m in retry_markers)
+
+
+def _cleanup_before_retry() -> None:
+    force_kill_playwright_browsers()
+    cleanup_playwright_state()
 
 
 def _with_retries(label: str, fn, *, once: bool = False):
@@ -55,13 +68,14 @@ def _with_retries(label: str, fn, *, once: bool = False):
             if attempt >= MAX_ATTEMPTS or not _is_retryable(exc):
                 raise
             logger.warning(
-                "%s attempt %d/%d failed (%s); retrying in %.0fs",
+                "%s attempt %d/%d failed (%s); cleaning up and retrying in %.0fs",
                 label,
                 attempt,
                 MAX_ATTEMPTS,
                 exc,
                 RETRY_BACKOFF_SECONDS,
             )
+            _cleanup_before_retry()
             time.sleep(RETRY_BACKOFF_SECONDS)
     assert last_exc is not None
     raise last_exc

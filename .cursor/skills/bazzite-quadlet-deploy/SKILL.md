@@ -55,7 +55,7 @@ Required / recommended keys:
 | `COOLHURST_DB_PATH` | Must be `/data/courts.db` in the container |
 | `PLAYWRIGHT_HEADLESS` | `true` |
 | `SCRAPE_INTERVAL_SECONDS` | Prefer `300` (not the Dockerfile default of `60`) |
-| `SCRAPE_TIMEOUT_SECONDS` | Prefer `240` — hard watchdog so a hung Playwright scrape cannot block the scheduler forever |
+| `SCRAPE_TIMEOUT_SECONDS` | Prefer `240` — hard watchdog; scheduled scrapes run in an isolated subprocess so Chromium children are always reaped |
 | `HEALTH_STALE_AFTER_SECONDS` | Prefer `3600` (matches UI red / 1h stale tier; yellow warn is `HEALTH_WARN_AFTER_SECONDS=300`) |
 
 Do not put credentials in the Quadlet file or in git.
@@ -90,6 +90,7 @@ Label=traefik.http.services.coolhurst-svc.loadbalancer.server.port=8080
 
 [Service]
 Restart=always
+RuntimeMaxSec=86400
 
 [Install]
 WantedBy=default.target

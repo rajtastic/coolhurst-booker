@@ -332,9 +332,32 @@ def test_abandon_running_scrapes(tmp_path):
     assert latest_ok["id"] == finished
 
 
-def test_scheduled_scrape_watchdog_timeout(tmp_path, monkeypatch):
-    import time
+def test_reap_and_cleanup_playwright_state_are_idempotent(tmp_path, monkeypatch):
+    from pathlib import Path as RealPath
 
+    from coolhurst_booker.scraper import browser as browser_mod
+
+    profile = tmp_path / "playwright_chromiumdev_profile-abc"
+    profile.mkdir()
+    (profile / "x").write_text("y", encoding="utf-8")
+
+    real_path = browser_mod.Path
+
+    def path_factory(p="/tmp", *args, **kwargs):
+        if str(p) == "/tmp":
+            return tmp_path
+        return real_path(p, *args, **kwargs)
+
+    monkeypatch.setattr(browser_mod, "Path", path_factory)
+    assert profile.exists()
+    browser_mod.cleanup_playwright_state()
+    assert not profile.exists()
+    browser_mod.cleanup_playwright_state()
+    assert browser_mod.reap_child_zombies() == 0
+    assert isinstance(RealPath("/tmp"), RealPath)
+
+
+def test_scheduled_scrape_uses_subprocess_and_kills_on_timeout(tmp_path, monkeypatch):
     from coolhurst_booker.api import main as api_main
 
     db_path = str(tmp_path / "watchdog.db")
@@ -343,26 +366,70 @@ def test_scheduled_scrape_watchdog_timeout(tmp_path, monkeypatch):
 
     repo = CourtRepository(db_path)
     run_id = repo.start_scrape_run("2026-07-20T19:13:00+00:00", source="google")
-    assert repo.get_latest_scrape_run(source="google") is None  # still running, not finished
 
-    def hang_forever():
-        # Leave a running row as a real hung scrape would; then block.
-        time.sleep(30)
+    class FakeProc:
+        pid = 4242
+        returncode = None
 
+        def communicate(self, timeout=None):
+            import subprocess
+
+            raise subprocess.TimeoutExpired(cmd=["scrape"], timeout=timeout)
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    fake = FakeProc()
     with (
-        patch.object(api_main, "run_scrape", side_effect=hang_forever),
-        patch.object(api_main, "force_kill_playwright_browsers") as kill_mock,
+        patch.object(api_main.subprocess, "Popen", return_value=fake) as popen_mock,
+        patch.object(api_main.os, "killpg") as killpg_mock,
+        patch.object(api_main, "force_kill_playwright_browsers") as force_kill_mock,
+        patch.object(api_main, "reap_child_zombies") as reap_mock,
     ):
-        started = time.monotonic()
         api_main._scheduled_scrape()
-        elapsed = time.monotonic() - started
 
-    assert elapsed < 8
-    kill_mock.assert_called_once()
+    popen_mock.assert_called_once()
+    assert popen_mock.call_args.kwargs.get("start_new_session") is True
+    killpg_mock.assert_called_once()
+    force_kill_mock.assert_called()
+    reap_mock.assert_called()
+
     with repo._connect() as conn:
         row = dict(conn.execute("SELECT * FROM scrape_runs WHERE id = ?", (run_id,)).fetchone())
     assert row["status"] == "error"
     assert "timeout" in (row["error"] or "").lower()
-    # Lock must be released so a subsequent scrape can start.
+    assert api_main._scrape_lock.acquire(blocking=False)
+    api_main._scrape_lock.release()
+
+
+def test_scheduled_scrape_subprocess_success(tmp_path, monkeypatch):
+    from coolhurst_booker.api import main as api_main
+
+    monkeypatch.setenv("COOLHURST_DB_PATH", str(tmp_path / "ok.db"))
+    monkeypatch.setenv("SCRAPE_TIMEOUT_SECONDS", "30")
+
+    class FakeProc:
+        pid = 99
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return ("Found 1 available court slots\n", None)
+
+        def poll(self):
+            return self.returncode
+
+    with (
+        patch.object(api_main.subprocess, "Popen", return_value=FakeProc()) as popen_mock,
+        patch.object(api_main, "reap_child_zombies"),
+    ):
+        api_main._scheduled_scrape()
+
+    popen_mock.assert_called_once()
+    args = popen_mock.call_args.args[0]
+    assert args[-2:] == ["coolhurst_booker.jobs.scrape_job", "--once"]
     assert api_main._scrape_lock.acquire(blocking=False)
     api_main._scrape_lock.release()

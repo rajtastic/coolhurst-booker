@@ -1,5 +1,8 @@
 import logging
 import os
+import signal
+import subprocess
+import sys
 import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -12,8 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from coolhurst_booker.config import get_settings
 from coolhurst_booker.db.repository import get_repository
-from coolhurst_booker.jobs.scrape_job import run_scrape
-from coolhurst_booker.scraper.browser import force_kill_playwright_browsers
+from coolhurst_booker.scraper.browser import force_kill_playwright_browsers, reap_child_zombies
 
 logger = logging.getLogger(__name__)
 
@@ -36,40 +38,65 @@ def _abandon_running(reason: str) -> None:
         logger.exception("Failed to abandon running scrape_runs")
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    if proc.pid is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.warning("Scrape subprocess %s did not exit after killpg", proc.pid)
+    force_kill_playwright_browsers()
+    reap_child_zombies()
+
+
 def _scheduled_scrape() -> None:
+    """Run scrapes in an isolated subprocess so Chromium children are always reaped."""
     if not _scrape_lock.acquire(blocking=False):
         logger.info("Skipping scrape: previous run still in progress")
         return
 
     settings = get_settings()
     timeout = settings.scrape_timeout_seconds
-    done = threading.Event()
-    errors: list[BaseException] = []
-
-    def _worker() -> None:
-        try:
-            run_scrape()
-        except BaseException as exc:  # noqa: BLE001 — capture for outer logger
-            errors.append(exc)
-        finally:
-            done.set()
+    cmd = [sys.executable, "-m", "coolhurst_booker.jobs.scrape_job", "--once"]
+    proc: subprocess.Popen | None = None
 
     try:
-        worker = threading.Thread(target=_worker, name="scrape-worker", daemon=True)
-        worker.start()
-        if not done.wait(timeout):
+        proc = subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
             logger.error(
-                "Scrape exceeded %ss; abandoning worker and killing Playwright browsers",
+                "Scrape subprocess exceeded %ss; killing process group %s",
                 timeout,
+                proc.pid,
             )
-            force_kill_playwright_browsers()
+            _kill_process_group(proc)
             _abandon_running("abandoned: scrape timeout")
-            # Brief grace for the worker to notice killed browsers and exit.
-            done.wait(2)
             return
-        if errors:
-            logger.exception("Scheduled scrape failed", exc_info=errors[0])
+
+        if stdout:
+            for line in stdout.strip().splitlines()[-40:]:
+                logger.info("[scrape] %s", line)
+
+        if proc.returncode and proc.returncode != 0:
+            logger.error("Scrape subprocess exited with code %s", proc.returncode)
+    except Exception:
+        logger.exception("Scheduled scrape subprocess failed")
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc)
+            _abandon_running("abandoned: scrape subprocess error")
     finally:
+        reap_child_zombies()
         _scrape_lock.release()
 
 
@@ -80,6 +107,7 @@ async def lifespan(app: FastAPI):
 
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         _abandon_running("abandoned: process restart")
+        force_kill_playwright_browsers()
         _scheduler = BackgroundScheduler()
         _scheduler.add_job(
             _scheduled_scrape,
@@ -91,7 +119,7 @@ async def lifespan(app: FastAPI):
         )
         _scheduler.start()
         logger.info(
-            "Scheduler started (interval=%ss, timeout=%ss)",
+            "Scheduler started (interval=%ss, timeout=%ss, mode=subprocess)",
             settings.scrape_interval_seconds,
             settings.scrape_timeout_seconds,
         )
