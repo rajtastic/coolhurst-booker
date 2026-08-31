@@ -188,6 +188,7 @@ def public_config() -> dict:
         "booker_name": settings.booker_name,
         "appointment_url": settings.google_appointment_url,
         "coolhurst_book_url": settings.coolhurst_book_url,
+        "days_ahead": settings.coolhurst_days_ahead,
         "scrape_interval_seconds": settings.scrape_interval_seconds,
         "scrape_timeout_seconds": settings.scrape_timeout_seconds,
         "health_warn_after_seconds": settings.health_warn_after_seconds,

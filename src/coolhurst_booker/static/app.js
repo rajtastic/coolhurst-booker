@@ -17,7 +17,9 @@ const state = {
     booker_name: "Roshan",
     appointment_url: "",
     coolhurst_book_url: "https://coolhurst.clubsolution.co.uk/newlook/proc_baner.asp",
+    days_ahead: 28,
     scrape_interval_seconds: 300,
+    scrape_timeout_seconds: 360,
     health_warn_after_seconds: 300,
     health_stale_after_seconds: 3600,
     show_public_court_calendar_link: true,
@@ -730,6 +732,15 @@ function setFreshnessPill(node, label, source) {
   else if (freshness === "unknown") node.classList.add("meta-pill--unknown");
 }
 
+function horizonLabel() {
+  const days = Number(state.config.days_ahead) || 28;
+  if (days % 7 === 0) {
+    const weeks = days / 7;
+    return weeks === 1 ? "next week" : `next ${weeks} weeks`;
+  }
+  return `next ${days} days`;
+}
+
 function updateMeta() {
   const name = state.config.booker_name || "Roshan";
   setFreshnessPill(el.lastUpdatedCourts, "Courts", "coolhurst");
@@ -738,7 +749,7 @@ function updateMeta() {
   const total = allVisibleSlots().length;
   const label = filtersActive()
     ? `${total} matching slots`
-    : `${state.slots.length} slots in next 2 weeks`;
+    : `${state.slots.length} slots in ${horizonLabel()}`;
   el.totalSlots.textContent = label;
 }
 
@@ -746,7 +757,7 @@ function applyConfig() {
   const name = state.config.booker_name || "Roshan";
   document.title = `Play Tennis with ${name} · Coolhurst`;
   el.heroTitle.textContent = `Book tennis with ${name}`;
-  el.heroLead.textContent = `Outdoor courts at Coolhurst that line up with ${name}'s appointment availability over the next two weeks. Use Calendar · Both for times that work for both of you.`;
+  el.heroLead.textContent = `Outdoor courts at Coolhurst that line up with ${name}'s appointment availability over the ${horizonLabel()}. Use Calendar · Both for times that work for both of you.`;
   el.chipPerson.textContent = name;
   const mins = state.config.scrape_interval_seconds || 300;
   const label =

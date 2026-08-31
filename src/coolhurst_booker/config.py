@@ -12,11 +12,11 @@ class Settings(BaseSettings):
     coolhurst_password: str = ""
     coolhurst_base_url: str = "https://coolhurst.clubsolution.co.uk/newlook"
     coolhurst_booking_area: str = "Outdoor Tennis"
-    coolhurst_days_ahead: int = 14
+    coolhurst_days_ahead: int = 28
     coolhurst_db_path: str = "./data/courts.db"
     playwright_headless: bool = True
     scrape_interval_seconds: int = 300
-    scrape_timeout_seconds: int = 240
+    scrape_timeout_seconds: int = 360
     health_warn_after_seconds: int = 300
     health_stale_after_seconds: int = 3600
 

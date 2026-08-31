@@ -1,4 +1,5 @@
 from coolhurst_booker.scraper.google_appointments import (
+    GoogleAppointmentResult,
     _parse_slot_list_payload,
     _to_person_slots,
 )
@@ -14,6 +15,10 @@ def test_parse_list_available_slots_payload():
     )
     parsed = _parse_slot_list_payload(body)
     assert parsed == [(1784109600, 60), (1784120400, 60)]
+
+
+def test_parse_empty_list_available_slots_payload():
+    assert _parse_slot_list_payload("[]") == []
 
 
 def test_to_person_slots_filters_and_formats():
@@ -38,3 +43,32 @@ def test_to_person_slots_filters_and_formats():
     assert slots[0].start_time == "11:00"
     assert slots[0].end_time == "12:00"
     assert slots[1].start_time == "14:00"
+
+
+def test_to_person_slots_respects_days_ahead_cutoff():
+    from datetime import UTC, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/London")
+    inside = (datetime.now(tz) + timedelta(days=10)).replace(
+        hour=19, minute=0, second=0, microsecond=0
+    )
+    outside = (datetime.now(tz) + timedelta(days=40)).replace(
+        hour=19, minute=0, second=0, microsecond=0
+    )
+    slots = _to_person_slots(
+        [
+            (int(inside.astimezone(UTC).timestamp()), 60),
+            (int(outside.astimezone(UTC).timestamp()), 60),
+        ],
+        scraped_at="2026-08-31T12:00:00+00:00",
+        days_ahead=28,
+    )
+    assert len(slots) == 1
+    assert slots[0].date == inside.date().isoformat()
+
+
+def test_google_appointment_result_trusted_flags():
+    assert GoogleAppointmentResult(rpc_captured=True).trusted is True
+    assert GoogleAppointmentResult(page_ok=True).trusted is True
+    assert GoogleAppointmentResult().trusted is False
