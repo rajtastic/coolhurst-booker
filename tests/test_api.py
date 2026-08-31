@@ -98,14 +98,17 @@ def test_health_endpoint_degraded_when_one_scraper_stale(client, tmp_path, monke
     assert "coolhurst" in data["message"]
 
 
-def test_config_endpoint(client):
+def test_config_endpoint(client, monkeypatch):
+    monkeypatch.setenv("COOLHURST_DAYS_AHEAD", "28")
+    monkeypatch.setenv("SCRAPE_TIMEOUT_SECONDS", "360")
     response = client.get("/config")
     assert response.status_code == 200
     data = response.json()
     assert data["booker_name"] == "Roshan"
     assert "appointments" in data["appointment_url"]
+    assert data["days_ahead"] == 28
     assert data["scrape_interval_seconds"] == 300
-    assert data["scrape_timeout_seconds"] == 240
+    assert data["scrape_timeout_seconds"] == 360
     assert data["health_warn_after_seconds"] == 300
     assert data["health_stale_after_seconds"] == 3600
     assert data["show_public_court_calendar_link"] is True
@@ -262,11 +265,13 @@ def test_upsert_slots_prunes_past_dates(tmp_path):
     assert slots[0]["start_time"] == "12:00"
 
 
-def test_google_empty_scrape_preserves_person_slots(tmp_path, monkeypatch):
+def test_google_untrusted_empty_scrape_preserves_person_slots(tmp_path, monkeypatch):
+    from coolhurst_booker.scraper.google_appointments import GoogleAppointmentResult
+
     db_path = str(tmp_path / "preserve.db")
     monkeypatch.setenv("COOLHURST_DB_PATH", db_path)
     monkeypatch.setenv("GOOGLE_APPOINTMENT_URL", "https://example.com/appointments")
-    monkeypatch.setenv("COOLHURST_DAYS_AHEAD", "14")
+    monkeypatch.setenv("COOLHURST_DAYS_AHEAD", "28")
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
 
     repo = CourtRepository(db_path)
@@ -286,10 +291,18 @@ def test_google_empty_scrape_preserves_person_slots(tmp_path, monkeypatch):
     fake_cm = MagicMock()
     fake_cm.__enter__.return_value = (None, None, None, fake_page)
     fake_cm.__exit__.return_value = None
+    untrusted_empty = GoogleAppointmentResult(
+        slots=[],
+        rpc_captured=False,
+        page_ok=False,
+        note="page broken",
+    )
 
     with (
         patch.object(scrape_job, "browser_session", return_value=fake_cm),
-        patch.object(scrape_job, "scrape_google_appointments", return_value=[]),
+        patch.object(
+            scrape_job, "scrape_google_appointments", return_value=untrusted_empty
+        ),
     ):
         kept = scrape_job.run_google_scrape(once=True)
 
@@ -300,6 +313,54 @@ def test_google_empty_scrape_preserves_person_slots(tmp_path, monkeypatch):
     assert latest is not None
     assert latest["status"] == "error"
     assert "preserved" in (latest["error"] or "").lower()
+
+
+def test_google_trusted_empty_scrape_clears_person_slots(tmp_path, monkeypatch):
+    from coolhurst_booker.scraper.google_appointments import GoogleAppointmentResult
+
+    db_path = str(tmp_path / "trusted_empty.db")
+    monkeypatch.setenv("COOLHURST_DB_PATH", db_path)
+    monkeypatch.setenv("GOOGLE_APPOINTMENT_URL", "https://example.com/appointments")
+    monkeypatch.setenv("COOLHURST_DAYS_AHEAD", "28")
+    monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
+
+    repo = CourtRepository(db_path)
+    repo.replace_person_slots(
+        [
+            PersonSlot(
+                date="2026-07-22",
+                start_time="19:00",
+                end_time="20:00",
+                scraped_at="2026-07-19T10:00:00+00:00",
+            )
+        ]
+    )
+
+    fake_page = MagicMock()
+    fake_cm = MagicMock()
+    fake_cm.__enter__.return_value = (None, None, None, fake_page)
+    fake_cm.__exit__.return_value = None
+    trusted_empty = GoogleAppointmentResult(
+        slots=[],
+        rpc_captured=True,
+        page_ok=True,
+        note="RPC captured but no open slots in horizon",
+    )
+
+    with (
+        patch.object(scrape_job, "browser_session", return_value=fake_cm),
+        patch.object(
+            scrape_job, "scrape_google_appointments", return_value=trusted_empty
+        ),
+    ):
+        count = scrape_job.run_google_scrape(once=True)
+
+    assert count == 0
+    assert repo.count_person_slots() == 0
+    latest = repo.get_latest_scrape_run(source="google")
+    assert latest is not None
+    assert latest["status"] == "ok"
+    assert repo.get_last_scrape(source="google") is not None
 
 
 def test_abandon_running_scrapes(tmp_path):

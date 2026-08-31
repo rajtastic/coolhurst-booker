@@ -65,7 +65,7 @@ The API process still runs the Coolhurst + Google scrapers on `SCRAPE_INTERVAL_S
 | `COOLHURST_USERNAME` | — | Club login username |
 | `COOLHURST_PASSWORD` | — | Club login password |
 | `COOLHURST_BOOKING_AREA` | `Outdoor Tennis` | Booking area to scrape |
-| `COOLHURST_DAYS_AHEAD` | `14` | Days of availability to scan |
+| `COOLHURST_DAYS_AHEAD` | `28` | Days of availability to scan |
 | `COOLHURST_DB_PATH` | `./data/courts.db` | SQLite database path |
 | `COOLHURST_BOOK_URL` | Coolhurst `proc_baner.asp` | Outbound court booking link |
 | `BOOKER_NAME` | `Roshan` | Name shown in the UI / Calendar filter |
@@ -74,6 +74,7 @@ The API process still runs the Coolhurst + Google scrapers on `SCRAPE_INTERVAL_S
 | `GOOGLE_PASSWORD` | — | Optional Google login password |
 | `PLAYWRIGHT_HEADLESS` | `true` | Set `false` to watch the browser |
 | `SCRAPE_INTERVAL_SECONDS` | `300` | Scrape interval when running API (5 minutes) |
+| `SCRAPE_TIMEOUT_SECONDS` | `360` | Hard kill for a combined scrape subprocess |
 
 ## Bazzite / Quadlet
 

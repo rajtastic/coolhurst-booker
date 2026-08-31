@@ -15,7 +15,10 @@ from coolhurst_booker.scraper.browser import (
     force_kill_playwright_browsers,
     wait_for_grid,
 )
-from coolhurst_booker.scraper.google_appointments import scrape_google_appointments
+from coolhurst_booker.scraper.google_appointments import (
+    GoogleAppointmentResult,
+    scrape_google_appointments,
+)
 from coolhurst_booker.scraper.navigation import scrape_days, select_booking_area
 from coolhurst_booker.scraper.parser import parse_page
 
@@ -141,6 +144,61 @@ def run_coolhurst_scrape(once: bool = False) -> int:
     return _with_retries("Coolhurst", lambda: _run_coolhurst_once(once=once), once=once)
 
 
+def _persist_google_result(
+    repo,
+    run_id: int,
+    settings,
+    result: GoogleAppointmentResult,
+    *,
+    once: bool = False,
+) -> int:
+    """Persist Google scrape outcome; preserve prior slots only when untrusted."""
+    slots = result.slots
+    previous_count = repo.count_person_slots()
+    finished = datetime.now(UTC).isoformat()
+
+    if not slots and previous_count > 0 and not result.trusted:
+        note_bit = f" note={result.note}" if result.note else ""
+        error = (
+            f"Google scrape untrusted with 0 slots "
+            f"(rpc={result.rpc_captured}, page_ok={result.page_ok}{note_bit}); "
+            f"preserved {previous_count} existing person slots"
+        )
+        repo.finish_scrape_run(
+            run_id=run_id,
+            finished_at=finished,
+            days_scraped=settings.coolhurst_days_ahead,
+            slots_found=0,
+            status="error",
+            error=error,
+        )
+        logger.warning(error)
+        if once:
+            print(f"Preserved {previous_count} existing person slots (untrusted empty scrape)")
+        return previous_count
+
+    repo.replace_person_slots(slots)
+    repo.finish_scrape_run(
+        run_id=run_id,
+        finished_at=finished,
+        days_scraped=settings.coolhurst_days_ahead,
+        slots_found=len(slots),
+        status="ok",
+    )
+    logger.info(
+        "Google appointment scrape complete: %d person slots (trusted=%s)",
+        len(slots),
+        result.trusted,
+    )
+    if once:
+        print(f"Found {len(slots)} person availability slots")
+        for slot in slots[:10]:
+            print(f"  {slot.date} {slot.start_time}-{slot.end_time}")
+        if len(slots) > 10:
+            print(f"  ... and {len(slots) - 10} more")
+    return len(slots)
+
+
 def _run_google_once(once: bool = False) -> int:
     settings = get_settings()
     repo = get_repository(settings)
@@ -149,44 +207,10 @@ def _run_google_once(once: bool = False) -> int:
 
     try:
         with browser_session(settings) as (_, __, ___, page):
-            slots = scrape_google_appointments(page, settings)
-            previous_count = repo.count_person_slots()
-            if not slots and previous_count > 0:
-                finished = datetime.now(UTC).isoformat()
-                error = (
-                    f"Google scrape returned 0 slots but {previous_count} existing "
-                    "person slots were preserved"
-                )
-                repo.finish_scrape_run(
-                    run_id=run_id,
-                    finished_at=finished,
-                    days_scraped=settings.coolhurst_days_ahead,
-                    slots_found=0,
-                    status="error",
-                    error=error,
-                )
-                logger.warning(error)
-                if once:
-                    print(f"Preserved {previous_count} existing person slots (empty scrape)")
-                return previous_count
-
-            repo.replace_person_slots(slots)
-            finished = datetime.now(UTC).isoformat()
-            repo.finish_scrape_run(
-                run_id=run_id,
-                finished_at=finished,
-                days_scraped=settings.coolhurst_days_ahead,
-                slots_found=len(slots),
-                status="ok",
+            result = scrape_google_appointments(page, settings)
+            return _persist_google_result(
+                repo, run_id, settings, result, once=once
             )
-            logger.info("Google appointment scrape complete: %d person slots", len(slots))
-            if once:
-                print(f"Found {len(slots)} person availability slots")
-                for slot in slots[:10]:
-                    print(f"  {slot.date} {slot.start_time}-{slot.end_time}")
-                if len(slots) > 10:
-                    print(f"  ... and {len(slots) - 10} more")
-            return len(slots)
     except Exception as exc:
         finished = datetime.now(UTC).isoformat()
         repo.finish_scrape_run(
@@ -206,18 +230,22 @@ def run_google_scrape(once: bool = False) -> int:
 
 
 def run_scrape(once: bool = False) -> dict[str, int | None]:
-    """Run Coolhurst and Google scrapes independently; one failure does not block the other."""
-    results: dict[str, int | None] = {"coolhurst": None, "google": None}
+    """Run Google then Coolhurst independently; one failure does not block the other.
 
-    try:
-        results["coolhurst"] = run_coolhurst_scrape(once=once)
-    except Exception:
-        logger.exception("Coolhurst scrape failed during combined run")
+    Google runs first so a long Coolhurst day-loop cannot starve person availability
+    under the shared subprocess timeout.
+    """
+    results: dict[str, int | None] = {"coolhurst": None, "google": None}
 
     try:
         results["google"] = run_google_scrape(once=once)
     except Exception:
         logger.exception("Google scrape failed during combined run")
+
+    try:
+        results["coolhurst"] = run_coolhurst_scrape(once=once)
+    except Exception:
+        logger.exception("Coolhurst scrape failed during combined run")
 
     if results["coolhurst"] is None and results["google"] is None:
         raise RuntimeError("Both Coolhurst and Google scrapes failed")
